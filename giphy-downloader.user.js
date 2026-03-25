@@ -721,6 +721,243 @@
   }
 
   // ============================================================
+  // Batch Button — persistent via setInterval
+  // ============================================================
+
+  const NON_USER_PATHS = /^\/(search|explore|stickers|apps|categories|about|gifs|clips|reactions|entertainment|sports|artists|upload|settings|favorites|api|developers|embed)\b/i;
+
+  function isUserPage() {
+    const path = location.pathname;
+    if (path === '/' || NON_USER_PATHS.test(path)) return false;
+    return /^\/[a-zA-Z0-9_-]+/.test(path);
+  }
+
+  function ensureBatchButton() {
+    if (!isUserPage()) {
+      document.querySelectorAll('.gd-batch-container').forEach(el => el.remove());
+      return;
+    }
+    if (document.querySelector('.gd-batch-container')) return;
+    // Find Giphy's footer bar (contains Privacy/Terms links)
+    const footerBar = document.querySelector('a[href="/privacy"]')?.parentElement;
+    if (!footerBar) return; // retry on next interval
+    createBatchButton(footerBar);
+  }
+
+  function createBatchButton(footerBar) {
+    const username = location.pathname.match(/^\/([a-zA-Z0-9_-]+)/)?.[1];
+    if (!username) return;
+
+    // Create as a sibling inside Giphy's footer bar, after Privacy/Terms
+    const container = document.createElement('div');
+    container.className = 'gd-batch-container';
+
+    const btn = document.createElement('button');
+    btn.className = 'gd-batch-btn';
+    btn.textContent = 'Download All';
+
+    const panel = createFormatPanel('gd-batch-panel', (format) => {
+      panel.classList.remove('gd-open');
+      startBatchDownload(username, format, container);
+    });
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      document.querySelectorAll('.gd-panel.gd-open, .gd-batch-panel.gd-open').forEach(p => {
+        if (p !== panel) p.classList.remove('gd-open');
+      });
+      panel.classList.toggle('gd-open');
+    });
+
+    container.appendChild(btn);
+    container.appendChild(panel);
+    footerBar.appendChild(container);
+
+    getChannelId(username).catch(err => {
+      btn.disabled = true;
+      btn.title = 'Error: ' + err.message;
+    });
+  }
+
+  // ============================================================
+  // Progress helpers
+  // ============================================================
+
+  function showProgress(container, text, showCancel = true) {
+    let progress = container.querySelector('.gd-progress');
+    if (!progress) {
+      container.querySelector('.gd-batch-btn')?.style.setProperty('display', 'none');
+      container.querySelector('.gd-batch-panel')?.classList.remove('gd-open');
+
+      progress = document.createElement('div');
+      progress.className = 'gd-progress';
+      const textEl = document.createElement('span');
+      textEl.className = 'gd-progress-text';
+      progress.appendChild(textEl);
+
+      if (showCancel) {
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'gd-cancel-btn';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => {
+          batchState.isCancelled = true;
+          if (batchState.currentRequest) batchState.currentRequest.abort();
+          cancelBtn.disabled = true;
+          cancelBtn.textContent = 'Cancelling...';
+        });
+        progress.appendChild(cancelBtn);
+      }
+      container.appendChild(progress);
+    }
+    progress.querySelector('.gd-progress-text').textContent = text;
+    return progress;
+  }
+
+  function hideProgress(container) {
+    container.querySelector('.gd-progress')?.remove();
+    container.querySelector('.gd-batch-btn')?.style.removeProperty('display');
+  }
+
+  // ============================================================
+  // Batch Downloader
+  // ============================================================
+
+  async function startBatchDownload(username, format, container) {
+    batchState.isCancelled = false;
+    batchState.currentRequest = null;
+
+    try {
+      const channelId = await getChannelId(username);
+      showProgress(container, 'Fetching page 1...');
+
+      const { gifs, totalSizeEstimate, paginationError } = await fetchAllGifs(channelId, format, ({ phase, page }) => {
+        if (phase === 'metadata') {
+          showProgress(container, `Fetching page ${page}...`);
+        }
+      });
+
+      if (batchState.isCancelled) { hideProgress(container); return; }
+
+      if (paginationError && gifs.length > 0) {
+        if (!confirm(`Pagination error. ${gifs.length} GIFs collected.\nContinue?`)) {
+          hideProgress(container); return;
+        }
+      }
+
+      if (gifs.length === 0) {
+        showProgress(container, paginationError ? 'Error fetching GIF list.' : 'No GIFs found.', false);
+        setTimeout(() => hideProgress(container), 3000);
+        return;
+      }
+
+      const estimatedParts = Math.ceil(totalSizeEstimate / ZIP_SPLIT_SIZE_BYTES);
+      if (totalSizeEstimate > 500_000_000) {
+        const sizeMB = (totalSizeEstimate / 1_000_000).toFixed(1);
+        if (!confirm(`~${sizeMB} MB, ${gifs.length} GIFs, ~${estimatedParts} ZIP(s). Continue?`)) {
+          hideProgress(container); return;
+        }
+      }
+
+      let zipFiles = [];    // { name, data: Uint8Array }
+      let zipBytes = 0;
+      let partNum = 1;
+      let downloadedCount = 0;
+      let downloadedBytes = 0;
+      const failures = [];
+      const totalCount = gifs.length;
+
+      for (const gif of gifs) {
+        if (batchState.isCancelled) break;
+
+        const url = getFormatUrl(gif.images, format);
+        if (!url) {
+          failures.push({ id: gif.id, title: gif.title, error: 'Format not available' });
+          continue;
+        }
+
+        const dlMB = (downloadedBytes / 1_000_000).toFixed(1);
+        const totalMB = (totalSizeEstimate / 1_000_000).toFixed(1);
+        showProgress(container, `Downloading ${downloadedCount + 1} / ${totalCount} (${dlMB} / ~${totalMB} MB)...`);
+
+        let fileData = null;
+        let retries = 0;
+
+        while (retries <= 3) {
+          if (batchState.isCancelled) break;
+          try {
+            const req = gmFetch(url, { responseType: 'arraybuffer' });
+            batchState.currentRequest = req;
+            const resp = await req.promise;
+            fileData = new Uint8Array(resp.response);
+            break;
+          } catch (err) {
+            const isRetryable = err.status === 429 || err.status === 0;
+            if (isRetryable && retries < 3) {
+              await delay(Math.min(2000 * Math.pow(2, retries), 30000));
+              retries++;
+            } else {
+              failures.push({ id: gif.id, title: gif.title, error: err.message || `HTTP ${err.status}` });
+              break;
+            }
+          }
+        }
+
+        if (batchState.isCancelled) break;
+        if (!fileData) continue;
+
+        downloadedCount++;
+        const filename = makeFilename(gif.title, gif.id, format);
+        zipFiles.push({ name: filename, data: fileData });
+        zipBytes += fileData.length;
+        downloadedBytes += fileData.length;
+
+        if (zipBytes >= ZIP_SPLIT_SIZE_BYTES) {
+          showProgress(container, `Saving ZIP part ${partNum}...`, false);
+          const blob = await streamZipBlob(zipFiles);
+          saveBlob(blob, `${username}_${format}_${todayString()}_part${partNum}.zip`);
+          zipFiles = [];
+          zipBytes = 0;
+          partNum++;
+          if (batchState.isCancelled) break;
+        }
+
+        await delay(FETCH_DELAY_MS);
+      }
+
+      if (batchState.isCancelled) {
+        if (zipFiles.length > 0) {
+          showProgress(container, 'Saving partial ZIP...', false);
+          const blob = await streamZipBlob(zipFiles);
+          const suffix = partNum > 1 ? `_part${partNum}` : '';
+          saveBlob(blob, `${username}_${format}_${todayString()}${suffix}_partial.zip`);
+        }
+        hideProgress(container);
+        return;
+      }
+
+      if (zipFiles.length > 0) {
+        const isMultiPart = partNum > 1;
+        showProgress(container, isMultiPart ? `Saving ZIP part ${partNum}...` : 'Saving ZIP...', false);
+        const blob = await streamZipBlob(zipFiles);
+        const suffix = isMultiPart ? `_part${partNum}` : '';
+        saveBlob(blob, `${username}_${format}_${todayString()}${suffix}.zip`);
+      }
+
+      let summary = `Done! ${downloadedCount} files downloaded.`;
+      if (failures.length > 0) summary += ` ${failures.length} failed.`;
+      if (partNum > 1) summary += ` (${partNum} ZIP parts)`;
+      showProgress(container, summary, false);
+      setTimeout(() => hideProgress(container), 8000);
+
+    } catch (err) {
+      console.error('[Giphy Downloader] Batch error:', err);
+      showProgress(container, `Error: ${err.message}`, false);
+      setTimeout(() => hideProgress(container), 5000);
+    }
+  }
+
+  // ============================================================
   // Initialization
   // ============================================================
 
@@ -728,6 +965,10 @@
     injectStyles();
     scanAndInject();
     setupObserver();
+    // Check every second if batch button needs to be (re-)created
+    ensureBatchButton();
+    if (batchButtonInterval) clearInterval(batchButtonInterval);
+    batchButtonInterval = setInterval(ensureBatchButton, 1000);
   }
 
   var onNavigate = function () {
@@ -737,6 +978,7 @@
     });
     setTimeout(() => {
       scanAndInject();
+      ensureBatchButton();
     }, 500);
   };
 
