@@ -122,4 +122,74 @@
     const d = new Date();
     return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   }
+
+  // ============================================================
+  // Phase 1 — document-start interceptions (no DOM access)
+  // ============================================================
+
+  channelIdPromise = new Promise(resolve => {
+    channelIdResolve = resolve;
+  });
+
+  const originalFetch = unsafeWindow.fetch;
+  unsafeWindow.fetch = function (...args) {
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+    const match = url.match(/\/api\/v4\/channels\/(\d+)(?:\/|$|\?)/);
+    if (match && !interceptedChannelId) {
+      interceptedChannelId = match[1];
+      channelIdResolve(interceptedChannelId);
+    }
+    return originalFetch.apply(this, args);
+  };
+
+  const originalXhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
+  unsafeWindow.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    const match = typeof url === 'string' && url.match(/\/api\/v4\/channels\/(\d+)(?:\/|$|\?)/);
+    if (match && !interceptedChannelId) {
+      interceptedChannelId = match[1];
+      channelIdResolve(interceptedChannelId);
+    }
+    return originalXhrOpen.call(this, method, url, ...rest);
+  };
+
+  const originalPushState = unsafeWindow.history.pushState;
+  const originalReplaceState = unsafeWindow.history.replaceState;
+
+  unsafeWindow.history.pushState = function (...args) {
+    originalPushState.apply(this, args);
+    onUrlChange();
+  };
+
+  unsafeWindow.history.replaceState = function (...args) {
+    originalReplaceState.apply(this, args);
+    onUrlChange();
+  };
+
+  unsafeWindow.addEventListener('popstate', () => onUrlChange());
+
+  function getBasePath(url) {
+    try {
+      const path = new URL(url).pathname;
+      const match = path.match(/^\/([^/]+)/);
+      return match ? match[1].toLowerCase() : '/';
+    } catch { return '/'; }
+  }
+
+  function onUrlChange() {
+    const newUrl = location.href;
+    if (newUrl === currentUrl) return;
+
+    const oldBase = getBasePath(currentUrl);
+    const newBase = getBasePath(newUrl);
+    currentUrl = newUrl;
+
+    if (oldBase !== newBase) {
+      gifCache.clear();
+      interceptedChannelId = null;
+      channelIdPromise = new Promise(resolve => {
+        channelIdResolve = resolve;
+      });
+      if (typeof onNavigate === 'function') onNavigate();
+    }
+  }
 })();
