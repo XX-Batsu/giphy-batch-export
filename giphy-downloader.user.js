@@ -445,4 +445,304 @@
 
     return { gifs, totalSizeEstimate, paginationError: null };
   }
+
+  // ============================================================
+  // Styles
+  // ============================================================
+
+  function injectStyles() {
+    if (document.getElementById('giphy-dl-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'giphy-dl-styles';
+    style.textContent = `
+      .gd-btn {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        z-index: 10;
+        width: 28px;
+        height: 28px;
+        border-radius: 4px;
+        background: rgba(0, 0, 0, 0.65);
+        color: #fff;
+        border: none;
+        cursor: pointer;
+        font-size: 16px;
+        line-height: 28px;
+        text-align: center;
+        opacity: 0;
+        transition: opacity 0.15s;
+        padding: 0;
+        font-family: sans-serif;
+      }
+      .giphy-gif:hover .gd-btn,
+      .gd-btn:focus { opacity: 1; }
+      .gd-btn:hover { background: rgba(0, 0, 0, 0.85); }
+
+      .gd-panel {
+        position: absolute;
+        top: 36px;
+        right: 6px;
+        z-index: 20;
+        background: #1a1a2e;
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 4px 0;
+        min-width: 160px;
+        display: none;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      }
+      .gd-panel.gd-open { display: block; }
+
+      .gd-panel-item {
+        display: block;
+        width: 100%;
+        padding: 6px 12px;
+        border: none;
+        background: none;
+        color: #e0e0e0;
+        font-size: 12px;
+        text-align: left;
+        cursor: pointer;
+        font-family: sans-serif;
+        white-space: nowrap;
+      }
+      .gd-panel-item:hover { background: #2a2a4a; color: #fff; }
+
+      .gd-btn.gd-success { background: rgba(0, 180, 80, 0.8); }
+      .gd-btn.gd-error { background: rgba(220, 40, 40, 0.8); }
+
+      .gd-batch-container {
+        position: relative;
+        display: flex;
+      }
+      .gd-batch-btn {
+        display: flex;
+        background: #212121;
+        border-radius: 5px;
+        padding: 4px 14px;
+        color: #a6a6a6;
+        font-size: 14px;
+        border: none;
+        cursor: pointer;
+        font-family: inherit;
+        text-decoration: none;
+      }
+      .gd-batch-btn:hover { color: #fff; }
+      .gd-batch-btn:disabled {
+        color: #555;
+        cursor: not-allowed;
+      }
+
+      .gd-batch-panel {
+        position: absolute;
+        bottom: 100%;
+        left: 0;
+        margin-bottom: 4px;
+        z-index: 20;
+        background: #212121;
+        border: 1px solid #333;
+        border-radius: 5px;
+        padding: 4px 0;
+        min-width: 160px;
+        display: none;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      }
+      .gd-batch-panel.gd-open { display: block; }
+
+      .gd-progress {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: #212121;
+        border-radius: 5px;
+        padding: 4px 14px;
+        color: #a6a6a6;
+        font-size: 14px;
+        font-family: inherit;
+      }
+      .gd-progress-text { white-space: nowrap; }
+      .gd-cancel-btn {
+        background: #c0392b;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        padding: 4px 10px;
+        cursor: pointer;
+        font-size: 12px;
+        font-family: sans-serif;
+      }
+      .gd-cancel-btn:hover { background: #e74c3c; }
+      .gd-cancel-btn:disabled { background: #666; cursor: not-allowed; }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  // ============================================================
+  // UI Module
+  // ============================================================
+
+  const INJECTED_ATTR = 'data-gd-injected';
+
+  function createFormatPanel(containerClass, onFormatClick) {
+    const panel = document.createElement('div');
+    panel.className = containerClass;
+
+    for (const fmt of DEFAULT_FORMATS) {
+      const btn = document.createElement('button');
+      btn.className = 'gd-panel-item';
+      btn.textContent = FORMAT_INFO[fmt].label;
+      btn.dataset.format = fmt;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onFormatClick(fmt);
+      });
+      panel.appendChild(btn);
+    }
+
+    return panel;
+  }
+
+  function injectSingleGifButton(gifEl) {
+    if (gifEl.getAttribute(INJECTED_ATTR)) return;
+    gifEl.setAttribute(INJECTED_ATTR, '1');
+
+    const gifId = gifEl.dataset.giphyId;
+    if (!gifId) return;
+
+    const btn = document.createElement('button');
+    btn.className = 'gd-btn';
+    btn.textContent = '⬇';
+    btn.title = 'Download GIF';
+
+    const panel = createFormatPanel('gd-panel', async (format) => {
+      panel.classList.remove('gd-open');
+      btn.textContent = '…';
+      try {
+        await downloadSingleGif(gifId, format, gifEl);
+        btn.classList.add('gd-success');
+        btn.textContent = '✓';
+        setTimeout(() => {
+          btn.classList.remove('gd-success');
+          btn.textContent = '⬇';
+        }, 1500);
+      } catch (err) {
+        console.error('[Giphy Downloader] Download failed:', err);
+        btn.classList.add('gd-error');
+        btn.textContent = '✗';
+        btn.title = 'Error: ' + (err.message || err.status || 'unknown');
+        setTimeout(() => {
+          btn.classList.remove('gd-error');
+          btn.textContent = '⬇';
+          btn.title = 'Download GIF';
+        }, 3000);
+      }
+    });
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      document.querySelectorAll('.gd-panel.gd-open, .gd-batch-panel.gd-open').forEach(p => {
+        if (p !== panel) p.classList.remove('gd-open');
+      });
+      panel.classList.toggle('gd-open');
+    });
+
+    gifEl.appendChild(btn);
+    gifEl.appendChild(panel);
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.gd-btn, .gd-panel, .gd-batch-btn, .gd-batch-panel')) {
+      document.querySelectorAll('.gd-panel.gd-open, .gd-batch-panel.gd-open').forEach(p => {
+        p.classList.remove('gd-open');
+      });
+    }
+  }, true);
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.gd-panel.gd-open, .gd-batch-panel.gd-open').forEach(p => {
+        p.classList.remove('gd-open');
+      });
+    }
+  });
+
+  // ============================================================
+  // Downloader Module
+  // ============================================================
+
+  async function downloadSingleGif(gifId, format, gifEl) {
+    const cached = getGifDataFromCache(gifId);
+    let url = cached ? getFormatUrl(cached.images, format) : null;
+    if (!url) {
+      const cdnDomain = getCdnDomain(gifEl);
+      url = buildCdnUrl(gifId, format, cdnDomain);
+    }
+    if (!url) throw new Error(`Format "${format}" not available`);
+
+    const title = cached?.title || '';
+    const { promise } = gmFetch(url, { responseType: 'blob' });
+    const resp = await promise;
+    saveBlob(resp.response, makeFilename(title, gifId, format));
+  }
+
+  // ============================================================
+  // DOM Scanning & MutationObserver
+  // ============================================================
+
+  function scanAndInject() {
+    document.querySelectorAll('a.giphy-gif').forEach(el => {
+      injectSingleGifButton(el);
+    });
+  }
+
+  let observer = null;
+
+  function setupObserver() {
+    if (observer) observer.disconnect();
+    observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches?.('a.giphy-gif')) {
+            injectSingleGifButton(node);
+          }
+          if (node.querySelectorAll) {
+            node.querySelectorAll('a.giphy-gif').forEach(el => {
+              injectSingleGifButton(el);
+            });
+          }
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // ============================================================
+  // Initialization
+  // ============================================================
+
+  function initPhase2() {
+    injectStyles();
+    scanAndInject();
+    setupObserver();
+  }
+
+  var onNavigate = function () {
+    document.querySelectorAll(`[${INJECTED_ATTR}]`).forEach(el => {
+      el.removeAttribute(INJECTED_ATTR);
+      el.querySelectorAll('.gd-btn, .gd-panel').forEach(c => c.remove());
+    });
+    setTimeout(() => {
+      scanAndInject();
+    }, 500);
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initPhase2);
+  } else {
+    initPhase2();
+  }
 })();
