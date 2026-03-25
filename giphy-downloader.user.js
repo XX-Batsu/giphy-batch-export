@@ -313,4 +313,136 @@
 
     return new Response(readable).blob();
   }
+
+  // ============================================================
+  // API Module
+  // ============================================================
+
+  const GM_FETCH_TIMEOUT_MS = 60_000;
+
+  function gmFetch(url, opts = {}) {
+    let requestHandle;
+    const timeoutMs = opts.timeout || GM_FETCH_TIMEOUT_MS;
+    const promise = new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try { requestHandle.abort(); } catch (_) {}
+          reject({ status: 0, error: new Error(`Request timed out after ${timeoutMs / 1000}s`) });
+        }
+      }, timeoutMs);
+
+      requestHandle = GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        responseType: opts.responseType || 'json',
+        onload(resp) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (resp.status === 429) {
+            reject({ status: 429, response: resp });
+          } else if (resp.status >= 200 && resp.status < 300) {
+            resolve(resp);
+          } else {
+            reject({ status: resp.status, response: resp });
+          }
+        },
+        onerror(err) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject({ status: 0, error: err });
+        },
+        ontimeout() {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject({ status: 0, error: new Error('GM_xmlhttpRequest native timeout') });
+        },
+      });
+    });
+    return { promise, abort: () => requestHandle.abort() };
+  }
+
+  function parseChannelIdFromDOM() {
+    const html = document.documentElement.innerHTML;
+    const escaped = html.match(/\\"channel\\":\s*\{\s*\\"id\\":\s*(\d+)/);
+    if (escaped) return escaped[1];
+    const unescaped = html.match(/"channel"\s*:\s*\{\s*"id"\s*:\s*(\d+)/);
+    if (unescaped) return unescaped[1];
+    return null;
+  }
+
+  async function getChannelId(username) {
+    const intercepted = await Promise.race([
+      channelIdPromise,
+      delay(5000).then(() => null),
+    ]);
+
+    if (intercepted) return intercepted;
+
+    const fromDOM = parseChannelIdFromDOM();
+    if (fromDOM) {
+      channelIdResolve(fromDOM);
+      return fromDOM;
+    }
+
+    try {
+      const { promise } = gmFetch(`https://giphy.com/${username}`, { responseType: 'text' });
+      const resp = await promise;
+      const text = typeof resp.response === 'string' ? resp.response : resp.responseText;
+      const pageMatch = text.match(/"channel"\s*:\s*\{\s*"id"\s*:\s*(\d+)/);
+      if (pageMatch) {
+        channelIdResolve(pageMatch[1]);
+        return pageMatch[1];
+      }
+    } catch (err) {
+      console.error('[Giphy Downloader] channelId resolution failed:', err);
+    }
+
+    throw new Error('Could not determine channelId for ' + username);
+  }
+
+  function getGifDataFromCache(gifId) {
+    return gifCache.get(gifId) || null;
+  }
+
+  const batchState = {
+    isCancelled: false,
+    currentRequest: null,
+  };
+
+  async function fetchAllGifs(channelId, format, onProgress) {
+    const gifs = [];
+    let totalSizeEstimate = 0;
+    let url = `https://giphy.com/api/v4/channels/${channelId}/feed`;
+    let pageNum = 1;
+
+    while (url) {
+      if (batchState.isCancelled) break;
+      if (onProgress) onProgress({ phase: 'metadata', page: pageNum });
+
+      try {
+        const req = gmFetch(url);
+        batchState.currentRequest = req;
+        const resp = await req.promise;
+        const data = typeof resp.response === 'string' ? JSON.parse(resp.response) : resp.response;
+
+        for (const gif of (data.results || [])) {
+          gifs.push(gif);
+          gifCache.set(gif.id, gif);
+          totalSizeEstimate += getFormatSize(gif.images, format);
+        }
+
+        url = data.next || null;
+        pageNum++;
+      } catch (err) {
+        return { gifs, totalSizeEstimate, paginationError: err };
+      }
+    }
+
+    return { gifs, totalSizeEstimate, paginationError: null };
+  }
 })();
