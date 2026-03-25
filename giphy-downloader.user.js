@@ -124,76 +124,6 @@
   }
 
   // ============================================================
-  // Phase 1 — document-start interceptions (no DOM access)
-  // ============================================================
-
-  channelIdPromise = new Promise(resolve => {
-    channelIdResolve = resolve;
-  });
-
-  const originalFetch = unsafeWindow.fetch;
-  unsafeWindow.fetch = function (...args) {
-    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-    const match = url.match(/\/api\/v4\/channels\/(\d+)(?:\/|$|\?)/);
-    if (match && !interceptedChannelId) {
-      interceptedChannelId = match[1];
-      channelIdResolve(interceptedChannelId);
-    }
-    return originalFetch.apply(this, args);
-  };
-
-  const originalXhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
-  unsafeWindow.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    const match = typeof url === 'string' && url.match(/\/api\/v4\/channels\/(\d+)(?:\/|$|\?)/);
-    if (match && !interceptedChannelId) {
-      interceptedChannelId = match[1];
-      channelIdResolve(interceptedChannelId);
-    }
-    return originalXhrOpen.call(this, method, url, ...rest);
-  };
-
-  const originalPushState = unsafeWindow.history.pushState;
-  const originalReplaceState = unsafeWindow.history.replaceState;
-
-  unsafeWindow.history.pushState = function (...args) {
-    originalPushState.apply(this, args);
-    onUrlChange();
-  };
-
-  unsafeWindow.history.replaceState = function (...args) {
-    originalReplaceState.apply(this, args);
-    onUrlChange();
-  };
-
-  unsafeWindow.addEventListener('popstate', () => onUrlChange());
-
-  function getBasePath(url) {
-    try {
-      const path = new URL(url).pathname;
-      const match = path.match(/^\/([^/]+)/);
-      return match ? match[1].toLowerCase() : '/';
-    } catch { return '/'; }
-  }
-
-  function onUrlChange() {
-    const newUrl = location.href;
-    if (newUrl === currentUrl) return;
-
-    const oldBase = getBasePath(currentUrl);
-    const newBase = getBasePath(newUrl);
-    currentUrl = newUrl;
-
-    if (oldBase !== newBase) {
-      gifCache.clear();
-      interceptedChannelId = null;
-      channelIdPromise = new Promise(resolve => {
-        channelIdResolve = resolve;
-      });
-      if (typeof onNavigate === 'function') onNavigate();
-    }
-  }
-
-  // ============================================================
   // Streaming ZIP (no JSZip — works in userscript sandbox)
   // ============================================================
 
@@ -312,6 +242,76 @@
     });
 
     return new Response(readable).blob();
+  }
+
+  // ============================================================
+  // Phase 1 — document-start interceptions (no DOM access)
+  // ============================================================
+
+  channelIdPromise = new Promise(resolve => {
+    channelIdResolve = resolve;
+  });
+
+  const originalFetch = unsafeWindow.fetch;
+  unsafeWindow.fetch = function (...args) {
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+    const match = url.match(/\/api\/v4\/channels\/(\d+)(?:\/|$|\?)/);
+    if (match && !interceptedChannelId) {
+      interceptedChannelId = match[1];
+      channelIdResolve(interceptedChannelId);
+    }
+    return originalFetch.apply(this, args);
+  };
+
+  const originalXhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
+  unsafeWindow.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    const match = typeof url === 'string' && url.match(/\/api\/v4\/channels\/(\d+)(?:\/|$|\?)/);
+    if (match && !interceptedChannelId) {
+      interceptedChannelId = match[1];
+      channelIdResolve(interceptedChannelId);
+    }
+    return originalXhrOpen.call(this, method, url, ...rest);
+  };
+
+  const originalPushState = unsafeWindow.history.pushState;
+  const originalReplaceState = unsafeWindow.history.replaceState;
+
+  unsafeWindow.history.pushState = function (...args) {
+    originalPushState.apply(this, args);
+    onUrlChange();
+  };
+
+  unsafeWindow.history.replaceState = function (...args) {
+    originalReplaceState.apply(this, args);
+    onUrlChange();
+  };
+
+  unsafeWindow.addEventListener('popstate', () => onUrlChange());
+
+  function getBasePath(url) {
+    try {
+      const path = new URL(url).pathname;
+      const match = path.match(/^\/([^/]+)/);
+      return match ? match[1].toLowerCase() : '/';
+    } catch { return '/'; }
+  }
+
+  function onUrlChange() {
+    const newUrl = location.href;
+    if (newUrl === currentUrl) return;
+
+    const oldBase = getBasePath(currentUrl);
+    const newBase = getBasePath(newUrl);
+    currentUrl = newUrl;
+
+    if (oldBase !== newBase) {
+      gifCache.clear();
+      interceptedChannelId = null;
+      channelIdPromise = new Promise(resolve => {
+        channelIdResolve = resolve;
+      });
+      if (typeof onNavigate === 'function') onNavigate();
+    }
   }
 
   // ============================================================
@@ -688,141 +688,6 @@
     saveBlob(resp.response, makeFilename(title, gifId, format));
   }
 
-  // ============================================================
-  // DOM Scanning & MutationObserver
-  // ============================================================
-
-  function scanAndInject() {
-    document.querySelectorAll('a.giphy-gif').forEach(el => {
-      injectSingleGifButton(el);
-    });
-  }
-
-  let observer = null;
-
-  function setupObserver() {
-    if (observer) observer.disconnect();
-    observer = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) {
-          if (node.nodeType !== 1) continue;
-          if (node.matches?.('a.giphy-gif')) {
-            injectSingleGifButton(node);
-          }
-          if (node.querySelectorAll) {
-            node.querySelectorAll('a.giphy-gif').forEach(el => {
-              injectSingleGifButton(el);
-            });
-          }
-        }
-      }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-  }
-
-  // ============================================================
-  // Batch Button — persistent via setInterval
-  // ============================================================
-
-  const NON_USER_PATHS = /^\/(search|explore|stickers|apps|categories|about|gifs|clips|reactions|entertainment|sports|artists|upload|settings|favorites|api|developers|embed)\b/i;
-
-  function isUserPage() {
-    const path = location.pathname;
-    if (path === '/' || NON_USER_PATHS.test(path)) return false;
-    return /^\/[a-zA-Z0-9_-]+/.test(path);
-  }
-
-  function ensureBatchButton() {
-    if (!isUserPage()) {
-      document.querySelectorAll('.gd-batch-container').forEach(el => el.remove());
-      return;
-    }
-    if (document.querySelector('.gd-batch-container')) return;
-    // Find Giphy's footer bar (contains Privacy/Terms links)
-    const footerBar = document.querySelector('a[href="/privacy"]')?.parentElement;
-    if (!footerBar) return; // retry on next interval
-    createBatchButton(footerBar);
-  }
-
-  function createBatchButton(footerBar) {
-    const username = location.pathname.match(/^\/([a-zA-Z0-9_-]+)/)?.[1];
-    if (!username) return;
-
-    // Create as a sibling inside Giphy's footer bar, after Privacy/Terms
-    const container = document.createElement('div');
-    container.className = 'gd-batch-container';
-
-    const btn = document.createElement('button');
-    btn.className = 'gd-batch-btn';
-    btn.textContent = 'Download All';
-
-    const panel = createFormatPanel('gd-batch-panel', (format) => {
-      panel.classList.remove('gd-open');
-      startBatchDownload(username, format, container);
-    });
-
-    btn.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      document.querySelectorAll('.gd-panel.gd-open, .gd-batch-panel.gd-open').forEach(p => {
-        if (p !== panel) p.classList.remove('gd-open');
-      });
-      panel.classList.toggle('gd-open');
-    });
-
-    container.appendChild(btn);
-    container.appendChild(panel);
-    footerBar.appendChild(container);
-
-    getChannelId(username).catch(err => {
-      btn.disabled = true;
-      btn.title = 'Error: ' + err.message;
-    });
-  }
-
-  // ============================================================
-  // Progress helpers
-  // ============================================================
-
-  function showProgress(container, text, showCancel = true) {
-    let progress = container.querySelector('.gd-progress');
-    if (!progress) {
-      container.querySelector('.gd-batch-btn')?.style.setProperty('display', 'none');
-      container.querySelector('.gd-batch-panel')?.classList.remove('gd-open');
-
-      progress = document.createElement('div');
-      progress.className = 'gd-progress';
-      const textEl = document.createElement('span');
-      textEl.className = 'gd-progress-text';
-      progress.appendChild(textEl);
-
-      if (showCancel) {
-        const cancelBtn = document.createElement('button');
-        cancelBtn.className = 'gd-cancel-btn';
-        cancelBtn.textContent = 'Cancel';
-        cancelBtn.addEventListener('click', () => {
-          batchState.isCancelled = true;
-          if (batchState.currentRequest) batchState.currentRequest.abort();
-          cancelBtn.disabled = true;
-          cancelBtn.textContent = 'Cancelling...';
-        });
-        progress.appendChild(cancelBtn);
-      }
-      container.appendChild(progress);
-    }
-    progress.querySelector('.gd-progress-text').textContent = text;
-    return progress;
-  }
-
-  function hideProgress(container) {
-    container.querySelector('.gd-progress')?.remove();
-    container.querySelector('.gd-batch-btn')?.style.removeProperty('display');
-  }
-
-  // ============================================================
-  // Batch Downloader
-  // ============================================================
-
   async function startBatchDownload(username, format, container) {
     batchState.isCancelled = false;
     batchState.currentRequest = null;
@@ -955,6 +820,138 @@
       showProgress(container, `Error: ${err.message}`, false);
       setTimeout(() => hideProgress(container), 5000);
     }
+  }
+
+  // ============================================================
+  // DOM Scanning & MutationObserver
+  // ============================================================
+
+  function scanAndInject() {
+    document.querySelectorAll('a.giphy-gif').forEach(el => {
+      injectSingleGifButton(el);
+    });
+  }
+
+  let observer = null;
+
+  function setupObserver() {
+    if (observer) observer.disconnect();
+    observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches?.('a.giphy-gif')) {
+            injectSingleGifButton(node);
+          }
+          if (node.querySelectorAll) {
+            node.querySelectorAll('a.giphy-gif').forEach(el => {
+              injectSingleGifButton(el);
+            });
+          }
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // ============================================================
+  // Batch Button — persistent via setInterval
+  // ============================================================
+
+  const NON_USER_PATHS = /^\/(search|explore|stickers|apps|categories|about|gifs|clips|reactions|entertainment|sports|artists|upload|settings|favorites|api|developers|embed)\b/i;
+
+  function isUserPage() {
+    const path = location.pathname;
+    if (path === '/' || NON_USER_PATHS.test(path)) return false;
+    return /^\/[a-zA-Z0-9_-]+/.test(path);
+  }
+
+  function ensureBatchButton() {
+    if (!isUserPage()) {
+      document.querySelectorAll('.gd-batch-container').forEach(el => el.remove());
+      return;
+    }
+    if (document.querySelector('.gd-batch-container')) return;
+    // Find Giphy's footer bar (contains Privacy/Terms links)
+    const footerBar = document.querySelector('a[href="/privacy"]')?.parentElement;
+    if (!footerBar) return; // retry on next interval
+    createBatchButton(footerBar);
+  }
+
+  function createBatchButton(footerBar) {
+    const username = location.pathname.match(/^\/([a-zA-Z0-9_-]+)/)?.[1];
+    if (!username) return;
+
+    // Create as a sibling inside Giphy's footer bar, after Privacy/Terms
+    const container = document.createElement('div');
+    container.className = 'gd-batch-container';
+
+    const btn = document.createElement('button');
+    btn.className = 'gd-batch-btn';
+    btn.textContent = 'Download All';
+
+    const panel = createFormatPanel('gd-batch-panel', (format) => {
+      panel.classList.remove('gd-open');
+      startBatchDownload(username, format, container);
+    });
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      document.querySelectorAll('.gd-panel.gd-open, .gd-batch-panel.gd-open').forEach(p => {
+        if (p !== panel) p.classList.remove('gd-open');
+      });
+      panel.classList.toggle('gd-open');
+    });
+
+    container.appendChild(btn);
+    container.appendChild(panel);
+    footerBar.appendChild(container);
+
+    getChannelId(username).catch(err => {
+      btn.disabled = true;
+      btn.title = 'Error: ' + err.message;
+    });
+  }
+
+  // ============================================================
+  // Progress helpers
+  // ============================================================
+
+  function showProgress(container, text, showCancel = true) {
+    let progress = container.querySelector('.gd-progress');
+    if (!progress) {
+      container.querySelector('.gd-batch-btn')?.style.setProperty('display', 'none');
+      container.querySelector('.gd-batch-panel')?.classList.remove('gd-open');
+
+      progress = document.createElement('div');
+      progress.className = 'gd-progress';
+      const textEl = document.createElement('span');
+      textEl.className = 'gd-progress-text';
+      progress.appendChild(textEl);
+
+      if (showCancel) {
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'gd-cancel-btn';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => {
+          batchState.isCancelled = true;
+          if (batchState.currentRequest) batchState.currentRequest.abort();
+          cancelBtn.disabled = true;
+          cancelBtn.textContent = 'Cancelling...';
+        });
+        progress.appendChild(cancelBtn);
+      }
+      container.appendChild(progress);
+    }
+    progress.querySelector('.gd-progress-text').textContent = text;
+    return progress;
+  }
+
+
+  function hideProgress(container) {
+    container.querySelector('.gd-progress')?.remove();
+    container.querySelector('.gd-batch-btn')?.style.removeProperty('display');
   }
 
   // ============================================================
