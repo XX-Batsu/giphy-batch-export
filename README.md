@@ -34,7 +34,7 @@ Click **Cancel** at any time — already-downloaded files are saved as a partial
 
 | Key | Description |
 |---|---|
-| `source` | Source GIF (原始) — highest quality |
+| `source` | Source GIF — highest quality (original upload) |
 | `original` | Original GIF |
 | `original_mp4` | Original MP4 |
 
