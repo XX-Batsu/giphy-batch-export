@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Giphy Downloader
+// @name         Giphy Batch Export
 // @namespace    giphy-batch-export
 // @version      1.0.0
 // @description  Download GIFs from Giphy — single or batch with format selection
