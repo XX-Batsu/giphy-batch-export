@@ -9,6 +9,7 @@
 // @connect      giphy.com
 // @connect      *.giphy.com
 // @run-at       document-start
+// @license      MIT
 // ==/UserScript==
 
 (function () {
